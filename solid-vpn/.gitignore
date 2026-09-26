@@ -1,0 +1,104 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Solid VPN — .gitignore
+# ──────────────────────────────────────────────────────────────────────────────
+
+# ── Secrets (NEVER commit these) ─────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+*.der
+secrets/
+credentials/
+
+# ── Go ────────────────────────────────────────────────────────────────────────
+# Compiled binaries
+apps/api/bin/
+apps/agent/bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test output
+*.test
+*.out
+coverage.out
+coverage.html
+
+# Go workspace files (opt-in only)
+go.work
+go.work.sum
+
+# ── Rust ──────────────────────────────────────────────────────────────────────
+apps/vpn-engine/target/
+Cargo.lock.bak
+
+# ── Node / TypeScript (future clients) ───────────────────────────────────────
+node_modules/
+dist/
+build/
+.next/
+.nuxt/
+*.tsbuildinfo
+
+# ── Docker ────────────────────────────────────────────────────────────────────
+# Don't ignore docker-compose.override.yml — it's a useful local override pattern,
+# but .env files used by it are already ignored above.
+
+# ── Terraform ────────────────────────────────────────────────────────────────
+infrastructure/terraform/.terraform/
+infrastructure/terraform/.terraform.lock.hcl
+infrastructure/terraform/terraform.tfstate
+infrastructure/terraform/terraform.tfstate.backup
+infrastructure/terraform/terraform.tfvars
+infrastructure/terraform/*.tfvars
+# Keep terraform.tfvars.example committed
+!infrastructure/terraform/terraform.tfvars.example
+
+# ── Kubernetes ────────────────────────────────────────────────────────────────
+infrastructure/kubernetes/secrets/
+kubeconfig
+
+# ── IDE / Editor ──────────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── OS ────────────────────────────────────────────────────────────────────────
+.DS_Store
+.AppleDouble
+.LSOverride
+ehthumbs.db
+$RECYCLE.BIN/
+
+# ── Logs ──────────────────────────────────────────────────────────────────────
+*.log
+logs/
+*.pid
+
+# ── Test / Coverage artifacts ────────────────────────────────────────────────
+tests/e2e/results/
+tests/load/results/
+
+# ── Monitoring data volumes (local dev) ──────────────────────────────────────
+monitoring/grafana/data/
+monitoring/prometheus/data/
+
+# ── Temporary files ───────────────────────────────────────────────────────────
+tmp/
+temp/
+*.tmp
+*.bak
+*.orig

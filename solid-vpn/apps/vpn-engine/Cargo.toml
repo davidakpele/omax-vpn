@@ -1,0 +1,54 @@
+[package]
+name = "vpn-engine"
+version = "0.1.0"
+edition = "2021"
+authors = ["Solid VPN Team"]
+description = "Solid VPN data-plane engine — WireGuard interface and network management"
+license = "MIT"
+
+[[bin]]
+name = "vpn-engine"
+path = "src/main.rs"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1.44", features = ["full"] }
+
+# Structured logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Configuration / environment loading
+config = "0.15"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dotenvy = "0.15"
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# HTTP client (control-plane communication)
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# Metrics (Prometheus-compatible)
+prometheus = { version = "0.13", features = ["process"] }
+
+# UUIDs
+uuid = { version = "1", features = ["v4"] }
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+[dev-dependencies]
+tokio-test = "0.4"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[profile.dev]
+opt-level = 0
+debug = true

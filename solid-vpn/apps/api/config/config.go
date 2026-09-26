@@ -1,0 +1,78 @@
+package config
+
+import (
+	"fmt"
+	"os"
+	"strconv"
+)
+
+// Config holds all runtime configuration for the API.
+type Config struct {
+	// Server
+	Port        string
+	Environment string
+
+	// Database
+	DatabaseURL string
+
+	// JWT
+	JWTSecret          string
+	JWTAccessExpiryMin int
+	JWTRefreshExpiryH  int
+
+	// VPN Engine
+	VPNEngineURL   string
+	VPNEngineToken string
+
+	// Logging
+	LogLevel string
+}
+
+// Load reads configuration from environment variables.
+// It returns an error if any required value is missing.
+func Load() (*Config, error) {
+	cfg := &Config{
+		Port:        getEnv("PORT", "8080"),
+		Environment: getEnv("ENVIRONMENT", "development"),
+
+		DatabaseURL: mustGetEnv("DATABASE_URL"),
+
+		JWTSecret:          mustGetEnv("JWT_SECRET"),
+		JWTAccessExpiryMin: getEnvInt("JWT_ACCESS_EXPIRY_MINUTES", 15),
+		JWTRefreshExpiryH:  getEnvInt("JWT_REFRESH_EXPIRY_HOURS", 168),
+
+		VPNEngineURL:   getEnv("VPN_ENGINE_URL", "http://vpn-engine:9090"),
+		VPNEngineToken: mustGetEnv("VPN_ENGINE_TOKEN"),
+
+		LogLevel: getEnv("LOG_LEVEL", "info"),
+	}
+
+	return cfg, nil
+}
+
+func getEnv(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
+func mustGetEnv(key string) string {
+	v := os.Getenv(key)
+	if v == "" {
+		panic(fmt.Sprintf("required environment variable %q is not set", key))
+	}
+	return v
+}
+
+func getEnvInt(key string, fallback int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return fallback
+	}
+	return n
+}
