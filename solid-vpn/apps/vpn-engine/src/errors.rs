@@ -1,6 +1,5 @@
 use thiserror::Error;
 
-/// Top-level error type for the VPN engine.
 #[derive(Debug, Error)]
 pub enum EngineError {
     #[error("configuration error: {0}")]

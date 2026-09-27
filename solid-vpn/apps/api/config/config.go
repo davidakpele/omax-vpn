@@ -6,30 +6,22 @@ import (
 	"strconv"
 )
 
-// Config holds all runtime configuration for the API.
 type Config struct {
-	// Server
 	Port        string
 	Environment string
 
-	// Database
 	DatabaseURL string
 
-	// JWT
 	JWTSecret          string
 	JWTAccessExpiryMin int
 	JWTRefreshExpiryH  int
 
-	// VPN Engine
 	VPNEngineURL   string
 	VPNEngineToken string
 
-	// Logging
 	LogLevel string
 }
 
-// Load reads configuration from environment variables.
-// It returns an error if any required value is missing.
 func Load() (*Config, error) {
 	cfg := &Config{
 		Port:        getEnv("PORT", "8080"),

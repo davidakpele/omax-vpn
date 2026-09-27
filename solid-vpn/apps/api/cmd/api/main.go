@@ -16,24 +16,23 @@ import (
 	"go.uber.org/zap/zapcore"
 
 	"github.com/solid-vpn/api/config"
+	"github.com/solid-vpn/api/internal/auth"
+	"github.com/solid-vpn/api/internal/devices"
 	"github.com/solid-vpn/api/internal/health"
+	"github.com/solid-vpn/api/internal/users"
 	"github.com/solid-vpn/api/routes"
 )
 
 func main() {
-	// Load .env if present (non-fatal in production where env vars are injected)
 	_ = godotenv.Load()
 
-	// Bootstrap a temporary logger for startup errors
 	startupLog, _ := zap.NewProduction()
 
-	// Load configuration
 	cfg, err := config.Load()
 	if err != nil {
 		startupLog.Fatal("failed to load configuration", zap.Error(err))
 	}
 
-	// Build the structured logger
 	log, err := buildLogger(cfg.LogLevel)
 	if err != nil {
 		startupLog.Fatal("failed to build logger", zap.Error(err))
@@ -45,26 +44,39 @@ func main() {
 		zap.String("port", cfg.Port),
 	)
 
-	// Connect to PostgreSQL
 	pool, err := connectDB(cfg.DatabaseURL, log)
 	if err != nil {
-		// Non-fatal during development — the server still starts but /ready will report unhealthy.
 		log.Warn("database connection failed; /ready will report not-ready", zap.Error(err))
 	}
 	if pool != nil {
 		defer pool.Close()
 	}
 
-	// Build handlers
-	healthHandler := health.NewHandler(pool)
+	authRepo := auth.NewRepository(pool)
+	authSvc := auth.NewService(authRepo, auth.ServiceConfig{
+		JWTSecret:          cfg.JWTSecret,
+		AccessExpiryMin:    cfg.JWTAccessExpiryMin,
+		RefreshExpiryHours: cfg.JWTRefreshExpiryH,
+	})
+	authHandler := auth.NewHandler(authSvc)
 
-	// Build router
+	userRepo := users.NewRepository(pool)
+	userSvc := users.NewService(userRepo)
+	userHandler := users.NewHandler(userSvc)
+
+	deviceRepo := devices.NewRepository(pool)
+	deviceSvc := devices.NewService(deviceRepo)
+	deviceHandler := devices.NewHandler(deviceSvc)
+
 	handler := routes.New(routes.Options{
 		Logger:        log,
-		HealthHandler: healthHandler,
+		HealthHandler: health.NewHandler(pool),
+		AuthHandler:   authHandler,
+		AuthService:   authSvc,
+		UserHandler:   userHandler,
+		DeviceHandler: deviceHandler,
 	})
 
-	// HTTP server
 	srv := &http.Server{
 		Addr:         fmt.Sprintf(":%s", cfg.Port),
 		Handler:      handler,
@@ -73,7 +85,6 @@ func main() {
 		IdleTimeout:  60 * time.Second,
 	}
 
-	// Start server in a goroutine
 	serverErrors := make(chan error, 1)
 	go func() {
 		log.Info("vpn-api listening", zap.String("addr", srv.Addr))
@@ -82,7 +93,6 @@ func main() {
 		}
 	}()
 
-	// Graceful shutdown on signal
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 
@@ -103,7 +113,6 @@ func main() {
 	}
 }
 
-// connectDB establishes a pgxpool connection and verifies it with a ping.
 func connectDB(databaseURL string, log *zap.Logger) (*pgxpool.Pool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -122,7 +131,6 @@ func connectDB(databaseURL string, log *zap.Logger) (*pgxpool.Pool, error) {
 	return pool, nil
 }
 
-// buildLogger creates a zap.Logger at the requested level.
 func buildLogger(level string) (*zap.Logger, error) {
 	var zapLevel zapcore.Level
 	if err := zapLevel.UnmarshalText([]byte(level)); err != nil {

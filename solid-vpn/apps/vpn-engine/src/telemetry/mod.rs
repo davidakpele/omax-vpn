@@ -1,4 +1,3 @@
-/// Telemetry module — Prometheus metrics and health reporting.
 use prometheus::{
     register_gauge, register_int_counter, register_int_gauge, Encoder, Gauge, IntCounter,
     IntGauge, TextEncoder,
@@ -6,7 +5,6 @@ use prometheus::{
 use std::sync::OnceLock;
 use tracing::warn;
 
-/// Global metric handles — initialised once at startup.
 pub struct Metrics {
     pub active_sessions: IntGauge,
     pub sessions_total: IntCounter,
@@ -17,8 +15,6 @@ pub struct Metrics {
 
 static METRICS: OnceLock<Metrics> = OnceLock::new();
 
-/// Initialise global Prometheus metrics.
-/// Must be called once at startup before any metrics are recorded.
 pub fn init() -> &'static Metrics {
     METRICS.get_or_init(|| Metrics {
         active_sessions: register_int_gauge!(
@@ -53,12 +49,10 @@ pub fn init() -> &'static Metrics {
     })
 }
 
-/// Retrieve the global metrics handle.
 pub fn get() -> &'static Metrics {
-    METRICS.get().expect("metrics not initialised — call telemetry::init() at startup")
+    METRICS.get().expect("metrics not initialised")
 }
 
-/// Render all registered Prometheus metrics as a text exposition string.
 pub fn render() -> String {
     let encoder = TextEncoder::new();
     let metric_families = prometheus::gather();

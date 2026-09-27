@@ -1,4 +1,3 @@
-// Package middleware provides reusable HTTP middleware.
 package middleware
 
 import (
@@ -11,7 +10,6 @@ import (
 
 const requestIDHeader = "X-Request-ID"
 
-// RequestLogger returns middleware that logs each HTTP request with structured fields.
 func RequestLogger(log *zap.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -38,7 +36,6 @@ func RequestLogger(log *zap.Logger) func(http.Handler) http.Handler {
 	}
 }
 
-// Recoverer catches panics, logs them, and returns a 500.
 func Recoverer(log *zap.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -56,7 +53,6 @@ func Recoverer(log *zap.Logger) func(http.Handler) http.Handler {
 	}
 }
 
-// responseWriter wraps http.ResponseWriter to capture the status code.
 type responseWriter struct {
 	http.ResponseWriter
 	statusCode int
