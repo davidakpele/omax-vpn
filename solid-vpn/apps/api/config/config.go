@@ -19,6 +19,8 @@ type Config struct {
 	VPNEngineURL   string
 	VPNEngineToken string
 
+	VPNDNS string
+
 	LogLevel string
 }
 
@@ -35,6 +37,8 @@ func Load() (*Config, error) {
 
 		VPNEngineURL:   getEnv("VPN_ENGINE_URL", "http://vpn-engine:9090"),
 		VPNEngineToken: mustGetEnv("VPN_ENGINE_TOKEN"),
+
+		VPNDNS: getEnv("VPN_DNS", "1.1.1.1"),
 
 		LogLevel: getEnv("LOG_LEVEL", "info"),
 	}

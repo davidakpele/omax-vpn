@@ -19,7 +19,9 @@ import (
 	"github.com/solid-vpn/api/internal/auth"
 	"github.com/solid-vpn/api/internal/devices"
 	"github.com/solid-vpn/api/internal/health"
+	"github.com/solid-vpn/api/internal/servers"
 	"github.com/solid-vpn/api/internal/users"
+	"github.com/solid-vpn/api/internal/vpn"
 	"github.com/solid-vpn/api/routes"
 )
 
@@ -68,6 +70,14 @@ func main() {
 	deviceSvc := devices.NewService(deviceRepo)
 	deviceHandler := devices.NewHandler(deviceSvc)
 
+	serverRepo := servers.NewRepository(pool)
+	serverSvc := servers.NewService(serverRepo)
+	serverHandler := servers.NewHandler(serverSvc)
+
+	vpnRepo := vpn.NewRepository(pool)
+	vpnSvc := vpn.NewService(vpnRepo, serverSvc, deviceRepo, cfg.VPNDNS)
+	vpnHandler := vpn.NewHandler(vpnSvc)
+
 	handler := routes.New(routes.Options{
 		Logger:        log,
 		HealthHandler: health.NewHandler(pool),
@@ -75,6 +85,8 @@ func main() {
 		AuthService:   authSvc,
 		UserHandler:   userHandler,
 		DeviceHandler: deviceHandler,
+		ServerHandler: serverHandler,
+		VPNHandler:    vpnHandler,
 	})
 
 	srv := &http.Server{
