@@ -1,4 +1,3 @@
-// Package health provides HTTP handlers for liveness and readiness probes.
 package health
 
 import (
@@ -8,18 +7,14 @@ import (
 	"time"
 )
 
-// DB is the minimal interface the health handler needs to check the database.
 type DB interface {
 	Ping(ctx context.Context) error
 }
 
-// Handler holds dependencies for health endpoints.
 type Handler struct {
 	db DB
 }
 
-// NewHandler creates a health Handler.
-// db may be nil during startup; the readiness check will report not-ready.
 func NewHandler(db DB) *Handler {
 	return &Handler{db: db}
 }
@@ -31,12 +26,11 @@ type healthResponse struct {
 }
 
 type readyResponse struct {
-	Status   string            `json:"status"`
-	Checks   map[string]string `json:"checks"`
-	Timestamp time.Time        `json:"timestamp"`
+	Status    string            `json:"status"`
+	Checks    map[string]string `json:"checks"`
+	Timestamp time.Time         `json:"timestamp"`
 }
 
-// Live handles GET /health — always returns 200 while the process is running.
 func (h *Handler) Live(w http.ResponseWriter, r *http.Request) {
 	respond(w, http.StatusOK, healthResponse{
 		Status:    "ok",
@@ -45,12 +39,10 @@ func (h *Handler) Live(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// Ready handles GET /ready — returns 200 only when all dependencies are up.
 func (h *Handler) Ready(w http.ResponseWriter, r *http.Request) {
 	checks := make(map[string]string)
 	allOK := true
 
-	// Database check
 	if h.db != nil {
 		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 		defer cancel()

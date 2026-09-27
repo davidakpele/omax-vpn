@@ -1,19 +1,9 @@
-/// Authentication helpers for validating control-plane requests.
-///
-/// The engine verifies a bearer token on every incoming control request.
-/// It does NOT trust requests based on source IP alone.
-/// Phase 4 implementation.
 use tracing::warn;
 
-/// Validate a bearer token against the configured control-plane token.
-/// Returns true if valid, false otherwise.
-///
-/// SECURITY: Uses constant-time comparison to prevent timing attacks.
 pub fn validate_token(provided: &str, expected: &str) -> bool {
     use std::hint::black_box;
-    // Constant-time comparison: iterate all bytes even if they differ early.
     if provided.len() != expected.len() {
-        warn!("token length mismatch — rejected");
+        warn!("token length mismatch");
         return false;
     }
     let result = provided

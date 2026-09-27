@@ -1,5 +1,3 @@
-/// Session manager — owns the authoritative in-memory session state.
-/// Phase 4 implementation.
 use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
@@ -13,7 +11,6 @@ pub struct Session {
     pub started_at: DateTime<Utc>,
 }
 
-/// In-memory session store. Will be replaced with persistent storage in Phase 4.
 #[derive(Default)]
 pub struct SessionManager {
     sessions: HashMap<Uuid, Session>,
