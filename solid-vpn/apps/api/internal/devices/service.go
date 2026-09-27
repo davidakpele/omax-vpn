@@ -6,14 +6,17 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+
+	"github.com/solid-vpn/api/internal/audit"
 )
 
 type Service struct {
-	repo *Repository
+	repo  *Repository
+	audit *audit.Service
 }
 
-func NewService(repo *Repository) *Service {
-	return &Service{repo: repo}
+func NewService(repo *Repository, auditSvc *audit.Service) *Service {
+	return &Service{repo: repo, audit: auditSvc}
 }
 
 func (s *Service) Create(ctx context.Context, userID uuid.UUID, req CreateRequest) (*Device, error) {
@@ -37,18 +40,23 @@ func (s *Service) Create(ctx context.Context, userID uuid.UUID, req CreateReques
 	if err != nil {
 		return nil, fmt.Errorf("create device: %w", err)
 	}
+
+	s.audit.Log(ctx, audit.ActionDeviceRegistered, &userID, "device", &d.ID, map[string]any{
+		"name": d.Name,
+	})
+
 	return d, nil
 }
 
 func (s *Service) List(ctx context.Context, userID uuid.UUID) ([]*Device, error) {
-	devices, err := s.repo.ListByUser(ctx, userID)
+	list, err := s.repo.ListByUser(ctx, userID)
 	if err != nil {
 		return nil, fmt.Errorf("list devices: %w", err)
 	}
-	if devices == nil {
-		devices = []*Device{}
+	if list == nil {
+		list = []*Device{}
 	}
-	return devices, nil
+	return list, nil
 }
 
 func (s *Service) GetByID(ctx context.Context, id, userID uuid.UUID) (*Device, error) {
@@ -66,6 +74,9 @@ func (s *Service) Delete(ctx context.Context, id, userID uuid.UUID) error {
 	if err := s.repo.Revoke(ctx, id, userID); err != nil {
 		return err
 	}
+
+	s.audit.Log(ctx, audit.ActionDeviceDeleted, &userID, "device", &id, nil)
+
 	return nil
 }
 

@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 authors = ["Solid VPN Team"]
 description = "Solid VPN data-plane engine — WireGuard interface and network management"
-license = "MIT"
+license = "PROPRIETARY"
 
 [[bin]]
 name = "vpn-engine"

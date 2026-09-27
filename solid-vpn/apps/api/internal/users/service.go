@@ -6,16 +6,19 @@ import (
 	"regexp"
 
 	"github.com/google/uuid"
+
+	"github.com/solid-vpn/api/internal/audit"
 )
 
 var emailRegex = regexp.MustCompile(`^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$`)
 
 type Service struct {
-	repo *Repository
+	repo  *Repository
+	audit *audit.Service
 }
 
-func NewService(repo *Repository) *Service {
-	return &Service{repo: repo}
+func NewService(repo *Repository, auditSvc *audit.Service) *Service {
+	return &Service{repo: repo, audit: auditSvc}
 }
 
 func (s *Service) GetByID(ctx context.Context, id uuid.UUID) (*User, error) {
@@ -61,5 +64,8 @@ func (s *Service) Delete(ctx context.Context, id uuid.UUID) error {
 	if err := s.repo.SoftDelete(ctx, id); err != nil {
 		return fmt.Errorf("delete user: %w", err)
 	}
+
+	s.audit.Log(ctx, audit.ActionUserDeleted, &id, "user", &id, nil)
+
 	return nil
 }
