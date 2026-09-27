@@ -1,1706 +1,551 @@
 # Solid VPN
 
-**Solid VPN** is a production-oriented VPN platform designed around a strict separation between the **control plane** and the **VPN data plane**.
-
-The platform is designed to provide secure user authentication, device management, VPN server management, server selection, WireGuard configuration, peer lifecycle management, subscription and payment integration, session tracking, DNS/network management, audit logging, monitoring, and infrastructure automation.
-
-The architecture uses:
-
-- **Go** for the control plane and business/API layer
-- **Rust** for the VPN data plane and networking engine
-- **WireGuard** for the VPN protocol and encrypted tunnel
-- **PostgreSQL** for persistent application data
-- **React/TypeScript** for web/admin interfaces where required
-- **Docker** for local development
-- **Terraform** for infrastructure provisioning
-- **Ansible** for server configuration and provisioning
-- **Prometheus/Grafana** for observability
-
-> **Project status note:** This README is derived from the supplied Solid VPN master development specification. It documents the software architecture, scope, responsibilities, and intended capabilities described by that specification. It does not by itself certify that every listed component has already been implemented or deployed.
+A VPN platform with a strict separation between the control plane (Go) and the data plane (Rust), using WireGuard as the underlying VPN protocol.
 
 ---
 
-## Table of Contents
+## Architecture
 
-- [Overview](#overview)
-- [What Solid VPN Covers](#what-solid-vpn-covers)
-- [Core Architecture](#core-architecture)
-- [Technology Stack](#technology-stack)
-- [Control Plane](#control-plane)
-- [VPN Data Plane](#vpn-data-plane)
-- [WireGuard](#wireguard)
-- [End-to-End VPN Flow](#end-to-end-vpn-flow)
-- [Server Selection](#server-selection)
-- [Users, Devices and Peers](#users-devices-and-peers)
-- [Subscriptions and Payments](#subscriptions-and-payments)
-- [DNS, Routing, NAT and Firewall](#dns-routing-nat-and-firewall)
-- [Security Model](#security-model)
-- [Authentication and Authorization](#authentication-and-authorization)
-- [Secrets and Key Management](#secrets-and-key-management)
-- [Audit Logging](#audit-logging)
-- [Observability](#observability)
-- [Database](#database)
-- [API](#api)
-- [Project Structure](#project-structure)
-- [Infrastructure](#infrastructure)
-- [Client Architecture](#client-architecture)
-- [Development Environment](#development-environment)
-- [Testing](#testing)
-- [Configuration](#configuration)
-- [Documentation](#documentation)
-- [Threat Model](#threat-model)
-- [Development Phases](#development-phases)
-- [MVP Scope](#mvp-scope)
-- [Engineering Rules](#engineering-rules)
-- [Known Boundaries](#known-boundaries)
-- [Getting Started](#getting-started)
-- [Future Expansion](#future-expansion)
-- [Conclusion](#conclusion)
+```
+              ┌──────────────────┐
+              │     Clients      │
+              │  (any WireGuard  │
+              │   compatible)    │
+              └────────┬─────────┘
+                       │ HTTPS
+                       ▼
+              ┌──────────────────┐
+              │   Go Control     │
+              │     Plane        │
+              │                  │
+              │  Auth & JWT      │
+              │  Users           │
+              │  Devices         │
+              │  Server Select   │
+              │  Peer Lifecycle  │
+              │  Sessions        │
+              │  Audit Logging   │
+              └────────┬─────────┘
+                       │ Bearer Token (HTTP)
+                       │ mTLS (planned)
+                       ▼
+              ┌──────────────────┐
+              │   Rust Data      │
+              │     Plane        │
+              │                  │
+              │  axum HTTP API   │
+              │  WireGuard mgmt  │
+              │  Routing         │
+              │  NAT / iptables  │
+              │  Firewall        │
+              │  DNS             │
+              │  Prometheus      │
+              └────────┬─────────┘
+                       │
+                       ▼
+                   Internet
+```
+
+**Go** owns all business logic — authentication, user management, device registration, server selection, peer lifecycle, session tracking, and audit logging.
+
+**Rust** owns all network operations — the axum HTTP control API, WireGuard peer management, routing, NAT, firewall, and DNS. Currently the network calls are stubs; the control API is fully wired and operational.
+
+**WireGuard** provides the cryptographic VPN tunnel. No custom cryptography is implemented anywhere in the codebase.
 
 ---
 
-# Overview
+## What Is Built
 
-Solid VPN is designed as a scalable VPN service rather than a single VPN application.
+### Go Control Plane (`apps/api`)
 
-Its architecture separates the system into two major responsibilities:
+**Authentication**
 
-```text
-                         SOLID VPN
-                              │
-               ┌──────────────┴──────────────┐
-               │                             │
-          CONTROL PLANE                 DATA PLANE
-               │                             │
-               ▼                             ▼
-          Go API Service               Rust VPN Engine
-               │                             │
-               │ Secure Control API          │
-               └──────────────┬──────────────┘
-                              │
-                              ▼
-                         WireGuard
-                              │
-                              ▼
-                           Internet
-```
+- `POST /api/v1/auth/register` — register with email + password (bcrypt, min 12 chars)
+- `POST /api/v1/auth/login` — returns JWT access token (15 min) + refresh token (7 days)
+- `POST /api/v1/auth/refresh` — rotating refresh tokens (old token revoked on use)
+- `POST /api/v1/auth/logout` — revoke refresh token server-side
 
-The **Go control plane** manages users, devices, access, servers, sessions, configuration, billing, and administrative operations.
+**Users**
 
-The **Rust data plane** manages the networking operations required to establish and maintain VPN connectivity, including WireGuard interfaces, peers, routing, NAT, firewall integration, DNS handling, and telemetry.
+- `GET /api/v1/users/me` — authenticated profile
+- `PATCH /api/v1/users/me` — update email
+- `DELETE /api/v1/users/me` — soft delete
 
-**WireGuard** remains responsible for the VPN protocol and cryptographic tunnel.
+**Devices**
 
-This separation is one of the most important architectural decisions in the project.
+- `POST /api/v1/devices` — register a WireGuard public key
+- `GET /api/v1/devices` — list user's devices
+- `GET /api/v1/devices/:id` — get device
+- `DELETE /api/v1/devices/:id` — revoke device
 
----
+**VPN Servers**
 
-# What Solid VPN Covers
+- `GET /api/v1/vpn/servers` — list healthy servers (filterable by country, region)
+- `GET /api/v1/vpn/servers/:id` — get a specific server
+- `GET /api/v1/vpn/regions` — list regions
 
-The platform is designed to cover the complete lifecycle of a managed VPN service.
+**VPN Lifecycle**
 
-## User Management
+- `POST /api/v1/vpn/connect` — allocate IP, create peer DB record, call Rust engine to add WireGuard peer, return `.conf` file string to client
+- `POST /api/v1/vpn/disconnect` — end session, call Rust engine to remove peer, release IP
+- `GET /api/v1/vpn/config` — retrieve config for an existing peer without creating a new session
+- `GET /api/v1/vpn/sessions` — paginated session history
+- `GET /api/v1/vpn/sessions/:id` — get a specific session
 
-The control plane is responsible for:
+**Health**
 
-- User registration
-- User authentication
-- User profile management
-- Session/token management
-- Account deletion
-- Role management
-- Access control
+- `GET /health` — liveness (always 200 while running)
+- `GET /ready` — readiness (checks PostgreSQL + Rust engine)
 
-## Device Management
+**Audit Logging**
 
-Users can be associated with registered devices.
+Every significant operation writes to the immutable `audit_logs` table:
 
-Device management covers:
+| Event                 | Trigger                 |
+| --------------------- | ----------------------- |
+| `USER_CREATED`        | Successful registration |
+| `USER_LOGIN`          | Successful login        |
+| `USER_LOGIN_FAILED`   | Failed password check   |
+| `USER_DELETED`        | Account deletion        |
+| `DEVICE_REGISTERED`   | Device creation         |
+| `DEVICE_DELETED`      | Device revocation       |
+| `VPN_SESSION_STARTED` | Successful connect      |
+| `VPN_SESSION_ENDED`   | Disconnect              |
 
-- Device registration
-- Device identification
-- Device lifecycle
-- Device-to-user relationships
-- Device-to-VPN session relationships
-- Device removal
+**Server Selection**
 
-## VPN Server Management
+The `Select()` algorithm picks the lowest-load healthy server. If a preferred `server_id` is supplied it is used when selectable, otherwise falls back to best-available. Filters by country when candidates exist for the requested country.
 
-The platform is designed to manage a fleet of VPN servers.
+### Rust Data Plane (`apps/vpn-engine`)
 
-A VPN server can contain information such as:
+**axum HTTP control API** on `0.0.0.0:9090`
 
-- Server ID
-- Name
-- Hostname
-- Public IP
-- Region
-- Country
-- City
-- Infrastructure provider
-- Status
-- Capacity
-- Active connection count
-- WireGuard port
-- WireGuard public key
+| Endpoint                    | Auth         | Description                             |
+| --------------------------- | ------------ | --------------------------------------- |
+| `GET /health`               | None         | Liveness check                          |
+| `GET /metrics`              | None         | Prometheus text exposition              |
+| `POST /peers`               | Bearer token | Add WireGuard peer + firewall + routing |
+| `DELETE /peers/:public_key` | Bearer token | Remove peer + revoke firewall + routing |
 
-The control plane can use this information to determine which server is appropriate for a connection.
+All `/peers` requests are validated with constant-time bearer token comparison. `/health` and `/metrics` are intentionally public for Docker healthchecks and Prometheus scraping.
 
-## VPN Server Selection
+**Structured logging** — JSON output via `tracing-subscriber`.
 
-Server selection considers operational information such as:
+**Prometheus metrics** — `vpn_active_sessions`, `vpn_sessions_total`, `vpn_connection_errors_total`, `vpn_peer_count`, `vpn_engine_uptime_seconds`.
 
-- Server health
-- Server status
-- Region
-- Country
-- Active connections
-- Configured capacity
-- Latency when available
-- Maintenance state
+**In-memory peer state** — `Arc<RwLock<HashMap<PublicKey, AssignedIP>>>` tracks active peers for firewall/routing cleanup on removal.
 
-Unhealthy servers should not be selected.
+Network functions (`tunnel/`, `network/`) are wired into the handler chain but are currently stubs that log operations. They are the correct shape for real WireGuard system calls — see [Next Features](#next-features) below.
 
-The selection component is intended to be deterministic and testable.
+### Database (`PostgreSQL 16`)
 
-## VPN Peer Management
+11 tables managed by sequential SQL migrations:
 
-A peer represents a user's VPN identity on a particular VPN server.
+| Table            | Purpose                                           |
+| ---------------- | ------------------------------------------------- |
+| `users`          | User accounts with bcrypt password hashes         |
+| `refresh_tokens` | Server-side refresh token store (revocable)       |
+| `devices`        | Registered WireGuard client public keys           |
+| `vpn_regions`    | Geographic region definitions                     |
+| `vpn_servers`    | VPN server nodes with capacity and status         |
+| `vpn_peers`      | WireGuard peer records (public key + assigned IP) |
+| `ip_allocations` | IP address pool per server (pessimistic locking)  |
+| `vpn_sessions`   | Active and historical session records             |
+| `subscriptions`  | Subscription plan records (schema ready)          |
+| `plans`          | Available subscription tiers (schema ready)       |
+| `payments`       | Payment records (schema ready)                    |
+| `audit_logs`     | Append-only immutable event log                   |
 
-Peer management covers:
+### Infrastructure
 
-- Peer creation
-- Peer configuration
-- Assigned VPN IP
-- Public key
-- Device association
-- Server association
-- Peer status
-- Peer removal or disabling
-
-Private keys should remain on the client whenever possible.
-
-## VPN Sessions
-
-The system tracks VPN sessions so the control plane can understand the current state of user connectivity.
-
-Session capabilities include:
-
-- Session creation
-- Active session tracking
-- Session expiration
-- Connection counts
-- Session closure
-- Server-level connection metrics
-- Session telemetry
-
-## Subscriptions and Payments
-
-The control plane includes a dedicated area for:
-
-- Subscription management
-- Plans
-- Payment records
-- Subscription validation before VPN access
-- Billing-related business logic
-
-The master specification defines the architecture for these capabilities but does not prescribe a particular payment provider.
-
-## DNS and Network Management
-
-The VPN engine is responsible for network-level operations including:
-
-- DNS handling
-- Routing
-- NAT
-- Firewall integration
-- Tunnel traffic management
-- Leak prevention mechanisms
-
-The system is intended to prevent:
-
-- DNS leaks
-- Accidental traffic outside the tunnel
-- Stale routes
-- Unauthorized access to VPN infrastructure
-
-A client-side kill switch is part of the planned client architecture.
-
-## Administration
-
-Administrative capabilities include:
-
-- VPN server management
-- Server health
-- User/device administration
-- Operational management
-- Audit review
-- Infrastructure-related control operations
-
-Administrative APIs must have separate authorization controls from ordinary user operations.
+- **Docker Compose** — `postgres`, `vpn-engine`, `api`, `prometheus`, `grafana` with health checks and ordered startup (`postgres` healthy → `vpn-engine` healthy → `api`)
+- **Prometheus** — scrapes `/metrics` from both API and engine
+- **Grafana** — auto-provisioned with Prometheus datasource
 
 ---
 
-# Core Architecture
+## Quick Start
 
-Solid VPN is intentionally divided into independent services.
+### Prerequisites
 
-```text
-                         Clients
-                            │
-                            │ HTTPS
-                            ▼
-                  ┌──────────────────┐
-                  │   Go Control     │
-                  │      Plane       │
-                  ├──────────────────┤
-                  │ Authentication   │
-                  │ Users            │
-                  │ Devices          │
-                  │ Billing          │
-                  │ VPN Management   │
-                  │ Sessions         │
-                  │ Server Selection │
-                  │ Audit Logs       │
-                  └────────┬─────────┘
-                           │
-                    Secure Control
-                           │
-                           ▼
-                  ┌──────────────────┐
-                  │  Rust Data Plane │
-                  ├──────────────────┤
-                  │ WireGuard        │
-                  │ Routing          │
-                  │ NAT              │
-                  │ Firewall         │
-                  │ DNS              │
-                  │ Networking       │
-                  │ Telemetry        │
-                  └────────┬─────────┘
-                           │
-                           ▼
-                        Internet
+| Tool           | Minimum version |
+| -------------- | --------------- |
+| Go             | 1.23            |
+| Rust           | 1.88            |
+| Docker         | 24              |
+| Docker Compose | v2              |
+
+### 1. Configure
+
+```bash
+cp .env.example .env
 ```
 
-## Architectural Responsibilities
+Edit `.env` and fill in:
 
-### Go Control Plane
-
-The Go service owns:
-
-- Authentication
-- Authorization
-- Users
-- Devices
-- VPN server inventory
-- Server selection
-- VPN configuration generation
-- Peer lifecycle orchestration
-- Sessions
-- Subscriptions
-- Payments
-- DNS configuration management
-- Server health information
-- Administration
-- Audit logging
-
-### Rust Data Plane
-
-The Rust service owns:
-
-- WireGuard interface management
-- Peer management at the networking layer
-- Routing
-- NAT
-- Firewall integration
-- DNS handling
-- Session/network telemetry
-- VPN server health reporting
-- Data-plane networking operations
-
-### WireGuard
-
-WireGuard owns the actual VPN protocol and cryptographic tunnel.
-
-The project does **not** replace WireGuard with a custom protocol.
-
----
-
-# Technology Stack
-
-| Area | Technology |
-|---|---|
-| Control plane | Go |
-| VPN/data plane | Rust |
-| VPN protocol | WireGuard |
-| Database | PostgreSQL |
-| Web/admin UI | React + TypeScript |
-| Local development | Docker / Docker Compose |
-| Infrastructure | Terraform |
-| Server provisioning | Ansible |
-| API specification | OpenAPI |
-| Inter-service protocol | Secure authenticated control API |
-| Metrics | Prometheus-compatible |
-| Dashboards | Grafana |
-| Operating system for VPN nodes | Linux initially |
-
-The specification deliberately avoids unnecessary technology choices where they are not required.
-
----
-
-# Control Plane
-
-The Go API is the business and orchestration layer of Solid VPN.
-
-## Clean Architecture
-
-The API follows a layered approach:
-
-```text
-HTTP Handler
-     │
-     ▼
-Service
-     │
-     ▼
-Repository
-     │
-     ▼
-PostgreSQL
+```bash
+POSTGRES_PASSWORD=$(openssl rand -hex 16)
+JWT_SECRET=$(openssl rand -hex 64)
+VPN_ENGINE_TOKEN=$(openssl rand -hex 32)
+VPN_ENGINE_SERVER_ID=$(uuidgen)
 ```
 
-### Handlers
+### 2. Start
 
-Handlers deal with HTTP concerns:
-
-- Request parsing
-- Validation at the API boundary
-- Authentication context
-- HTTP responses
-- HTTP error mapping
-
-### Services
-
-Services contain business logic such as:
-
-- Selecting a VPN server
-- Creating a peer
-- Validating subscription access
-- Managing device lifecycle
-- Managing sessions
-
-### Repositories
-
-Repositories contain persistence logic and database access.
-
-Business logic should not be placed directly in HTTP handlers.
-
----
-
-# API
-
-The API is versioned under:
-
-```text
-/api/v1
+```bash
+docker compose up -d
 ```
 
-## Authentication
+Wait for all services to be healthy (~30 seconds on first run due to Rust compilation):
 
-```http
-POST /api/v1/auth/register
-POST /api/v1/auth/login
-POST /api/v1/auth/refresh
-POST /api/v1/auth/logout
+```bash
+docker compose ps
 ```
 
-## Current User
+### 3. Run migrations
 
-```http
-GET    /api/v1/users/me
-PATCH  /api/v1/users/me
-DELETE /api/v1/users/me
+```bash
+for f in apps/api/migrations/*.sql; do
+  docker exec -i solid-vpn-postgres-1 psql -U postgres -d solidvpn < "$f"
+done
 ```
 
-## Devices
-
-```http
-GET    /api/v1/devices
-POST   /api/v1/devices
-GET    /api/v1/devices/:id
-DELETE /api/v1/devices/:id
-```
-
-## VPN
-
-```http
-GET  /api/v1/vpn/servers
-GET  /api/v1/vpn/servers/:id
-POST /api/v1/vpn/connect
-POST /api/v1/vpn/disconnect
-GET  /api/v1/vpn/config
-```
-
-## Sessions
-
-```http
-GET /api/v1/vpn/sessions
-GET /api/v1/vpn/sessions/:id
-```
-
-## Health
-
-```http
-GET /health
-GET /ready
-```
-
-Administrative endpoints require separate authorization.
-
----
-
-# VPN Data Plane
-
-The Rust VPN engine is designed primarily for Linux VPN servers.
-
-Its responsibility is to perform the actual networking operations rather than business/API operations.
-
-## Main Modules
-
-```text
-config/
-tunnel/
-network/
-sessions/
-security/
-telemetry/
-```
-
-### Configuration
-
-Responsible for:
-
-- Environment configuration
-- Runtime settings
-- Configuration validation
-- Control-plane connection settings
-- WireGuard interface settings
-
-### Tunnel
-
-Responsible for:
-
-- WireGuard interface management
-- Peer configuration
-- Tunnel lifecycle
-- Interface state
-
-### Network
-
-Responsible for:
-
-- Routing
-- NAT
-- Firewall integration
-- DNS
-
-### Sessions
-
-Responsible for:
-
-- Active sessions
-- Connection tracking
-- Session expiration
-- Connection counts
-- Session telemetry
-
-### Security
-
-Responsible for:
-
-- Control-plane authentication
-- Credential validation
-- Key handling
-- Secure communication
-
-### Telemetry
-
-Responsible for:
-
-- Health
-- Metrics
-- Connection counts
-- Errors
-- Resource usage
-
----
-
-# WireGuard
-
-Solid VPN uses WireGuard as its VPN protocol.
-
-The project explicitly does **not** implement:
-
-- Custom encryption
-- Custom handshakes
-- Custom VPN protocols
-- Custom key exchange
-- Custom packet encryption
-
-The Rust engine manages WireGuard rather than replacing its cryptographic design.
-
-Where possible, the system should use established WireGuard implementations, libraries, or the system WireGuard interface.
-
----
-
-# Control Plane ↔ VPN Engine Communication
-
-The Go API and Rust engine communicate over a secure, authenticated control channel.
-
-Conceptually:
-
-```text
-Go API
-  │
-  │ Authenticated control request
-  ▼
-Rust VPN Engine
-  │
-  ├── Configure peer
-  ├── Remove peer
-  ├── Report health
-  └── Report status
-```
-
-The engine's administrative interface must never be publicly exposed without authentication.
-
-The architecture favors:
-
-- TLS
-- Short-lived credentials
-- Service identity
-- Authorization
-- Request validation
-
-A request must not be trusted merely because it originated from a known IP address.
-
----
-
-# End-to-End VPN Flow
-
-A typical connection follows this sequence:
-
-```text
-1. User authenticates
-        ↓
-2. User registers device
-        ↓
-3. API validates subscription/access
-        ↓
-4. API selects a suitable VPN server
-        ↓
-5. API creates or updates VPN peer
-        ↓
-6. API communicates with VPN engine
-        ↓
-7. VPN engine configures WireGuard peer
-        ↓
-8. Client receives VPN configuration
-        ↓
-9. Client establishes WireGuard tunnel
-        ↓
-10. Session becomes active
-        ↓
-11. Health and session state are tracked
-```
-
-## Disconnect Flow
-
-```text
-Client
-  ↓
-Disconnect
-  ↓
-Go API
-  ↓
-Rust VPN Engine
-  ↓
-Remove/disable peer
-  ↓
-Session closed
-```
-
----
-
-# Server Selection
-
-Solid VPN is designed to support multiple VPN nodes across regions.
-
-Example infrastructure:
-
-```text
-                    Control Plane
-                         │
-          ┌──────────────┼──────────────┐
-          │              │              │
-          ▼              ▼              ▼
-      VPN Node        VPN Node       VPN Node
-       Nigeria           UK             USA
-          │              │              │
-        Rust           Rust           Rust
-          │              │              │
-      WireGuard      WireGuard      WireGuard
-```
-
-Server selection can consider:
-
-- Health
-- Status
-- Region
-- Country
-- Capacity
-- Active connections
-- Latency
-- Maintenance state
-
-The selection logic should be deterministic and independently testable.
-
----
-
-# Users, Devices and Peers
-
-The data model separates the user identity from the physical/device identity and VPN identity.
-
-```text
-User
- │
- ├── Devices
- │      │
- │      └── VPN Sessions
- │
- └── Subscription
-
-
-VPN Server
- │
- ├── VPN Peers
- │
- ├── VPN Sessions
- │
- └── IP Allocations
-```
-
-This allows one user to have multiple devices while maintaining independent VPN identities and sessions.
-
----
-
-# Subscriptions and Payments
-
-Subscription state is part of the control plane.
-
-Before establishing a VPN connection, the control plane can validate whether the user has the required access.
-
-The data model includes:
-
-```text
-subscriptions
-plans
-payments
-```
-
-The supplied specification defines the platform architecture for these areas but does not define a specific external payment gateway.
-
----
-
-# DNS, Routing, NAT and Firewall
-
-The data plane manages network behavior required for VPN traffic.
-
-## Routing
-
-The engine is responsible for applying validated routes required by the VPN configuration.
-
-## NAT
-
-NAT allows VPN client traffic to reach external networks through the VPN server.
-
-## Firewall
-
-Firewall rules should be explicitly controlled and validated.
-
-The system must never accept arbitrary firewall commands directly from untrusted user input.
-
-## DNS
-
-DNS handling is part of the VPN networking layer and is designed to reduce the risk of DNS leakage.
-
-## Kill Switch
-
-The client architecture is intended to eventually support a kill switch so traffic cannot accidentally bypass the VPN tunnel when the connection is expected to be active.
-
----
-
-# Security Model
-
-Security is a core design requirement rather than an optional layer.
-
-The system follows principles including:
-
-1. Security first
-2. Least privilege
-3. Explicit authorization
-4. Strong typing
-5. Explicit error handling
-6. No custom cryptography
-7. Minimal secret exposure
-8. No secret logging
-9. Deterministic behavior
-10. Observable failures
-11. Secure production configuration
-12. Test critical security functionality
-
----
-
-# Authentication and Authorization
-
-## Authentication
-
-The platform requires secure authentication mechanisms.
-
-Passwords must never be stored in plaintext.
-
-Session and token mechanisms must be designed to prevent unauthorized access.
-
-## Authorization
-
-The architecture includes roles such as:
-
-```text
-USER
-ADMIN
-SYSTEM
-```
-
-Authorization must always be enforced server-side.
-
-The frontend must never be treated as the authority for privileged operations.
-
----
-
-# Secrets and Key Management
-
-Secrets must never be committed to source control.
-
-The following must not be stored in Git:
-
-```text
-.env
-private keys
-JWT secrets
-database passwords
-API keys
-cloud credentials
-```
-
-Instead, the repository provides an environment template:
-
-```text
-.env.example
-```
-
-WireGuard private keys should remain on the client whenever possible.
-
-VPN server private keys should not be stored as plaintext in the normal application database. If they must be stored centrally, an appropriate secret-management system should be used.
-
----
-
-# Logging
-
-Solid VPN uses structured logging.
-
-Example:
-
-```json
-{
-  "level": "info",
-  "service": "vpn-api",
-  "event": "vpn_session_created",
-  "session_id": "..."
+On Windows (PowerShell):
+
+```powershell
+Get-ChildItem apps\api\migrations\*.sql | ForEach-Object {
+    Get-Content $_.FullName | docker exec -i solid-vpn-postgres-1 psql -U postgres -d solidvpn
 }
 ```
 
-Sensitive credentials must never appear in logs.
+### 4. Verify
 
-Do not log:
+```bash
+curl http://localhost:8080/health
+# {"status":"ok","service":"vpn-api"}
 
-- Passwords
-- Private keys
-- Access tokens
-- Refresh tokens
-- VPN credentials
-- API credentials
-- Sensitive user information
+curl http://localhost:8080/ready
+# {"status":"ready","checks":{"database":"healthy","vpn_engine":"healthy"}}
+```
 
 ---
 
-# Audit Logging
+## API Walkthrough
 
-Important administrative and lifecycle events should produce immutable audit records.
+### Register and authenticate
 
-Examples include:
+```bash
+curl -s -X POST http://localhost:8080/api/v1/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"email":"alice@example.com","password":"strongpassword123"}'
 
-```text
-USER_CREATED
-DEVICE_REGISTERED
-VPN_SERVER_CREATED
-VPN_PEER_CREATED
-VPN_PEER_REMOVED
-VPN_SESSION_STARTED
-VPN_SESSION_ENDED
-SUBSCRIPTION_CREATED
-ADMIN_ACTION
+TOKEN=$(curl -s -X POST http://localhost:8080/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"alice@example.com","password":"strongpassword123"}' \
+  | jq -r '.access_token')
 ```
 
-Audit records contain concepts such as:
+### Register a device
 
-```text
-id
-actor_id
-action
-resource_type
-resource_id
-metadata
-created_at
+```bash
+curl -s -X POST http://localhost:8080/api/v1/devices \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"My Laptop","public_key":"mNb8O2FNkBkJo5tXhA3UGN4sbeE6DKBP3gRKe3DXnWk="}'
 ```
 
-Ordinary users must not be able to modify audit history.
+For a real tunnel, generate your own keypair first:
 
----
-
-# Observability
-
-The platform is designed to be observable in production.
-
-## Metrics
-
-Important metrics include:
-
-```text
-vpn_active_sessions
-vpn_sessions_total
-vpn_connection_errors
-vpn_server_health
-vpn_peer_count
-vpn_api_requests
-vpn_api_latency
+```bash
+wg genkey | tee private.key | wg pubkey
 ```
 
-## Health Checks
+### List servers
 
-Go provides:
-
-```text
-/health
-/ready
+```bash
+curl -s http://localhost:8080/api/v1/vpn/servers \
+  -H "Authorization: Bearer $TOKEN" | jq '.servers[] | {id, name, country, status}'
 ```
 
-The Rust engine also exposes a health mechanism appropriate to its deployment.
+Seeded servers:
 
-## Infrastructure Monitoring
+| ID                                     | Name      | Country | City     |
+| -------------------------------------- | --------- | ------- | -------- |
+| `10000000-0000-0000-0000-000000000001` | NG-LAG-01 | NG      | Lagos    |
+| `10000000-0000-0000-0000-000000000002` | GB-LON-01 | GB      | London   |
+| `10000000-0000-0000-0000-000000000003` | US-NYC-01 | US      | New York |
 
-The system should monitor:
+### Connect to a server
 
-- CPU
-- Memory
-- Network traffic
-- Connection count
-- Errors
-- Server availability
-- VPN server health
-
-Prometheus-compatible metrics and Grafana dashboards are part of the observability architecture.
-
----
-
-# Database
-
-Solid VPN uses PostgreSQL for persistent application data.
-
-## Core Tables
-
-The initial model includes:
-
-```text
-users
-devices
-vpn_servers
-vpn_regions
-vpn_peers
-vpn_sessions
-subscriptions
-plans
-payments
-ip_allocations
-audit_logs
+```bash
+curl -s -X POST http://localhost:8080/api/v1/vpn/connect \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "device_id": "<your device id>",
+    "server_id": "10000000-0000-0000-0000-000000000002"
+  }'
 ```
 
-## Database Principles
-
-The database should use:
-
-- UUIDs for externally exposed identifiers
-- Foreign keys
-- Database constraints
-- Appropriate indexes
-- Created/updated timestamps where applicable
-- Migration-based schema changes
-
-Application-level validation should not be the only mechanism protecting data integrity.
-
-## Migrations
-
-Schema changes must be represented as migrations.
-
-Example:
-
-```text
-apps/api/migrations/
-
-000001_create_users.sql
-000002_create_devices.sql
-000003_create_vpn_servers.sql
-000004_create_vpn_peers.sql
-000005_create_sessions.sql
-```
-
-Production databases should not be modified manually.
-
----
-
-# API Error Handling
-
-API errors use a consistent structure.
-
-Example:
+Response:
 
 ```json
 {
-  "error": {
-    "code": "VPN_SERVER_UNAVAILABLE",
-    "message": "No healthy VPN server is currently available."
-  }
+  "session_id": "4d20ab3e-...",
+  "wireguard_config": "[Interface]\nAddress = 10.8.0.5/32\nDNS = 1.1.1.1\n\n[Peer]\n...",
+  "server_public_key": "...",
+  "assigned_ip": "10.8.0.5",
+  "dns": "1.1.1.1"
 }
 ```
 
-Internal stack traces must not be returned to clients.
+### Disconnect
 
-Internal error IDs can be used to correlate a client-facing error with server logs.
+```bash
+curl -s -X POST http://localhost:8080/api/v1/vpn/disconnect \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"session_id": "<session_id from connect>"}'
+```
+
+### Inspect audit log
+
+```bash
+docker exec solid-vpn-postgres-1 psql -U postgres -d solidvpn \
+  -c "SELECT action, resource_type, metadata, created_at FROM audit_logs ORDER BY created_at DESC LIMIT 10;"
+```
 
 ---
 
-# Project Structure
+## Development Commands
 
-The project follows a monorepo-style structure:
+```bash
+make build          # compile Go API + Rust engine locally
+make test           # run all tests
+make lint           # go vet + cargo clippy
+make format         # gofmt + rustfmt
+make docker-up      # start dev environment
+make docker-down    # stop dev environment
+make docker-logs    # follow all service logs
+make migrate        # apply database migrations
+make clean          # remove build artifacts
+make help           # list all targets
+```
 
-```text
+---
+
+## Environment Variables
+
+See [`.env.example`](.env.example) for all variables with descriptions.
+
+| Variable                    | Required | Default       | Description                              |
+| --------------------------- | -------- | ------------- | ---------------------------------------- |
+| `POSTGRES_PASSWORD`         | Yes      | —             | Database password                        |
+| `JWT_SECRET`                | Yes      | —             | 64-byte hex, signs JWT tokens            |
+| `VPN_ENGINE_TOKEN`          | Yes      | —             | 32-byte hex, authenticates Go→Rust calls |
+| `VPN_ENGINE_SERVER_ID`      | Yes      | —             | UUID identifying this VPN node           |
+| `VPN_DNS`                   | No       | `1.1.1.1`     | DNS pushed to VPN peers                  |
+| `VPN_ENGINE_PEER_CIDR`      | No       | `10.8.0.0/24` | IP pool for peer allocation              |
+| `VPN_ENGINE_WIREGUARD_PORT` | No       | `51820`       | WireGuard listen port                    |
+| `LOG_LEVEL`                 | No       | `info`        | trace / debug / info / warn / error      |
+
+---
+
+## Project Layout
+
+```
 solid-vpn/
-│
-├── README.md
-├── LICENSE
-├── Makefile
-├── docker-compose.yml
-├── .env.example
-├── .gitignore
-│
 ├── apps/
-│   ├── api/
-│   ├── vpn-engine/
-│   └── agent/
-│
-├── clients/
-│   ├── desktop/
-│   │   ├── windows/
-│   │   ├── macos/
-│   │   └── linux/
-│   ├── mobile/
-│   │   ├── android/
-│   │   └── ios/
-│   └── shared/
-│
-├── packages/
-│   ├── protocol/
-│   ├── config/
-│   └── schemas/
+│   ├── api/                    Go control-plane
+│   │   ├── cmd/api/main.go     Entry point, dependency wiring
+│   │   ├── config/             Environment-based config
+│   │   ├── internal/
+│   │   │   ├── audit/          Audit log service + repository
+│   │   │   ├── auth/           Register, login, JWT, refresh tokens
+│   │   │   ├── devices/        Device registration and management
+│   │   │   ├── engine/         Authenticated HTTP client for Rust engine
+│   │   │   ├── health/         Liveness + readiness handlers
+│   │   │   ├── middleware/      JWT auth middleware, request logger
+│   │   │   ├── servers/        VPN server management + selection
+│   │   │   ├── users/          User profile management
+│   │   │   └── vpn/            Peer lifecycle, sessions, WireGuard config
+│   │   ├── migrations/         Sequential SQL migrations (000001–000008)
+│   │   └── routes/             HTTP router wiring
+│   │
+│   ├── vpn-engine/             Rust data-plane
+│   │   └── src/
+│   │       ├── control/        axum HTTP server (health, metrics, peers)
+│   │       ├── config/         Settings from VPN_ENGINE_* env vars
+│   │       ├── tunnel/         WireGuard interface + peer stubs
+│   │       ├── network/        Routing, firewall, NAT, DNS stubs
+│   │       ├── sessions/       In-memory session manager
+│   │       ├── security/       Token validation (constant-time), key format check
+│   │       ├── telemetry/      Prometheus metrics
+│   │       └── errors.rs       Unified EngineError type
+│   │
+│   └── agent/                  Node agent (Phase 7 placeholder)
 │
 ├── infrastructure/
-│   ├── docker/
-│   ├── terraform/
-│   ├── ansible/
-│   ├── kubernetes/
-│   └── scripts/
-│
-├── deployments/
-│   ├── development/
-│   ├── staging/
-│   └── production/
-│
+│   ├── docker/                 api.Dockerfile, vpn.Dockerfile
+│   └── scripts/                seed.sql
 ├── monitoring/
-│   ├── prometheus/
-│   ├── grafana/
-│   └── alerts/
-│
-├── docs/
-│   ├── architecture.md
-│   ├── api.md
-│   ├── security.md
-│   ├── networking.md
-│   ├── deployment.md
-│   └── threat-model.md
-│
-└── tests/
-    ├── integration/
-    ├── e2e/
-    └── load/
+│   ├── prometheus/             prometheus.yml
+│   └── grafana/                Datasource provisioning
+├── packages/protocol/          openapi.yaml
+└── docs/                       Architecture, security, networking, deployment, threat model
 ```
 
 ---
 
-# Infrastructure
+## Next Features
 
-The platform is designed to support multiple Linux VPN nodes.
+### Immediate — Real WireGuard system calls (Rust)
 
-## Docker
+The stubs in `tunnel/` and `network/` need to be replaced with actual system operations. This requires a Linux node (WireGuard is a Linux kernel module).
 
-Docker is used for local development and should provide the minimum development environment:
+**`tunnel/wireguard.rs`** — create and configure the WireGuard interface:
 
-- Go API
-- PostgreSQL
-- VPN engine
+```rust
+use wireguard_control::{DeviceUpdate, InterfaceName, Key};
 
-## Terraform
-
-Terraform is intended to manage cloud/infrastructure resources such as:
-
-- Networks
-- VPN servers
-- Infrastructure resources
-- Environment-level configuration
-
-## Ansible
-
-Ansible can configure VPN nodes and perform tasks such as:
-
-- Server preparation
-- WireGuard setup
-- Firewall configuration
-- Runtime configuration
-
-## Kubernetes
-
-Kubernetes is supported as a future deployment option, but it is deliberately not required for the initial MVP.
-
-The architecture avoids introducing Kubernetes before it provides meaningful operational value.
-
----
-
-# Client Architecture
-
-The long-term client architecture includes:
-
-```text
-Windows
-macOS
-Linux
-Android
-iOS
+pub async fn init_interface(interface: &str, port: u16, private_key: &Key) {
+    let name = InterfaceName::from_str(interface).unwrap();
+    DeviceUpdate::new()
+        .set_private_key(private_key.clone())
+        .set_listen_port(port)
+        .apply(&name, Backend::Kernel)
+        .unwrap();
+}
 ```
 
-However, the platform should not attempt to implement every client simultaneously.
+**`tunnel/peer.rs`** — add/remove peers:
 
-The recommended progression is to prove the end-to-end architecture with one client platform first.
-
-## Client Responsibilities
-
-A client is responsible for:
-
-- Authentication
-- Device registration
-- VPN configuration
-- WireGuard tunnel control
-- Connection state
-- Disconnect
-- Server selection
-- Kill switch support
-
-Private VPN keys should preferably be generated and stored on the client.
-
----
-
-# Development Environment
-
-The project is designed to provide a reproducible local development environment.
-
-Expected development commands include:
-
-```bash
-make dev
-make build
-make test
-make lint
-make format
-make migrate
-make docker-up
-make docker-down
+```rust
+DeviceUpdate::new()
+    .add_peer(PeerConfigBuilder::new(&public_key)
+        .replace_allowed_ips()
+        .allow_ip(assigned_ip.parse().unwrap()))
+    .apply(&name, Backend::Kernel)
+    .unwrap();
 ```
 
-The initial environment should be able to start PostgreSQL, the Go API, and the Rust VPN engine through Docker Compose.
+**`network/firewall.rs`** — iptables rules via `iptables` crate or `std::process::Command` with validated inputs.
+
+**`network/nat.rs`** — masquerade rule for outbound traffic.
+
+**`network/routing.rs`** — `ip route add` via netlink or command.
+
+Crates to add: `wireguard-control`, `iptables`, `rtnetlink`.
 
 ---
 
-# Configuration
+### Phase 7 — Security Hardening
 
-Configuration is environment-based.
-
-Example variables include:
-
-```text
-DATABASE_URL=
-JWT_SECRET=
-CONTROL_PLANE_URL=
-VPN_ENGINE_TOKEN=
-WIREGUARD_INTERFACE=
-WIREGUARD_PORT=
-LOG_LEVEL=
-```
-
-A template should be provided:
-
-```text
-.env.example
-```
-
-No production secrets belong in the repository.
+- **mTLS between Go and Rust** — replace pre-shared bearer token with mutual TLS certificates
+- **WireGuard server private key management** — store in HashiCorp Vault or AWS Secrets Manager, never in plain env vars
+- **Rate limiting** — per-IP on auth endpoints, per-user on connect
+- **JWT rotation** — automated signing key rotation
+- **Dependency audit** — `govulncheck` in CI, `cargo audit` in CI
+- **Secret scanning** — `gitleaks` pre-commit hook
 
 ---
 
-# Testing
+### Phase 8 — Monitoring and Alerting
 
-Testing is mandatory for critical functionality.
-
-## Go Tests
-
-The API should include:
-
-- Unit tests
-- Service tests
-- Repository tests
-- HTTP handler tests
-- Integration tests
-
-## Rust Tests
-
-The VPN engine should include:
-
-- Unit tests
-- Configuration tests
-- Network tests
-- WireGuard management tests
-- Security tests
-
-## End-to-End Tests
-
-The target end-to-end flow is:
-
-```text
-Register user
-    ↓
-Register device
-    ↓
-Select VPN server
-    ↓
-Create peer
-    ↓
-Configure WireGuard
-    ↓
-Connect
-    ↓
-Verify session
-    ↓
-Disconnect
-```
-
-Automated tests should not require a real public VPN server for every test. Mocks and test doubles should be used where appropriate.
+- Grafana dashboards for active sessions, connection errors, server load per region
+- Prometheus alerts: server capacity > 80%, engine unreachable, high auth failure rate
+- Log aggregation — ship structured JSON logs to a centralised store (Loki, CloudWatch, etc.)
+- Distributed tracing — OpenTelemetry spans across Go→Rust control calls
 
 ---
 
-# API Specification
+### Phase 9 — Infrastructure
 
-The project maintains its API contract in:
-
-```text
-packages/protocol/openapi.yaml
-```
-
-The specification should document:
-
-- Authentication
-- Users
-- Devices
-- VPN servers
-- VPN configuration
-- Sessions
-- Subscriptions
-- Errors
-
-The API implementation and OpenAPI documentation should remain synchronized.
+- **Terraform** — provision VPS nodes (DigitalOcean, Hetzner, or AWS) per region
+- **Ansible** — configure Linux nodes: WireGuard kernel module, sysctl IP forwarding, iptables baseline, deploy vpn-engine binary
+- **Multi-region routing** — register real server rows in the database with actual public IPs and generated WireGuard keypairs
+- **Health-based server rotation** — mark servers offline when engine heartbeat is missed
 
 ---
 
-# Documentation
+### Phase 10 — Client Applications
 
-The project documentation is organized into focused technical documents:
+The `wireguard_config` string returned by `POST /vpn/connect` is a standard WireGuard `.conf` file. It works with any WireGuard client today. Native clients add:
 
-```text
-docs/architecture.md
-docs/api.md
-docs/security.md
-docs/networking.md
-docs/deployment.md
-docs/threat-model.md
-```
+- **Kill switch** — block all non-VPN traffic when tunnel drops
+- **Auto-connect** — reconnect on network change
+- **Server picker UI** — show latency per region, let user choose
+- **Split tunneling** — route only selected traffic through VPN
 
-These documents should explain:
-
-- System architecture
-- Data flow
-- Authentication
-- WireGuard integration
-- Server provisioning
-- Networking
-- Firewall requirements
-- Deployment
-- Security assumptions
-- Known limitations
+Platform targets: Linux (CLI first), macOS, Windows, Android, iOS.
 
 ---
 
-# Threat Model
+### Phase 11 — Billing and Subscriptions
 
-Solid VPN should explicitly consider at least the following threats:
+The `subscriptions`, `plans`, and `payments` tables are already migrated. Wire in:
 
-```text
-Compromised client
-Compromised VPN server
-Compromised API
-Stolen authentication token
-Stolen device
-Malicious administrator
-Database compromise
-Network interception
-Credential leakage
-Misconfigured firewall
-DNS leakage
-IP leakage
-Replay attempts
-Unauthorized peer creation
-```
-
-Each threat should be documented using:
-
-```text
-Threat
-Impact
-Likelihood
-Mitigation
-Residual risk
-```
-
-The project should not make broad claims that the system is "secure" without documenting the assumptions, controls, and remaining risks.
+- Stripe or Flutterwave for payment processing
+- Subscription gating on `POST /vpn/connect` — check active subscription before allocating a peer
+- Admin endpoints for plan management
+- Webhook handlers for payment events
 
 ---
 
-# Development Phases
+### Phase 12 — Admin API
 
-The project is designed to be implemented incrementally.
-
-## Phase 1 — Foundation
-
-Establish:
-
-- Repository structure
-- Go module
-- Rust project
-- Docker Compose
-- PostgreSQL
-- Environment configuration
-- Makefile
-- Initial documentation
-
-## Phase 2 — Go API
-
-Implement:
-
-- Health endpoints
-- Database connection
-- Migrations
-- User registration
-- Login
-- Authentication
-- Device registration
-
-## Phase 3 — VPN Server Management
-
-Implement:
-
-- VPN server records
-- VPN regions
-- Server registration
-- Server health
-- Server selection
-
-## Phase 4 — Rust VPN Engine
-
-Implement:
-
-- Configuration
-- WireGuard interface management
-- Peer management
-- Routing
-- NAT
-- Firewall integration
-- Health
-- Metrics
-
-Linux is the initial target for the VPN engine.
-
-## Phase 5 — Go/Rust Communication
-
-Implement:
-
-- Authenticated control channel
-- Peer creation
-- Peer removal
-- Server health
-- Status reporting
-
-## Phase 6 — End-to-End VPN
-
-Connect:
-
-```text
-User
- ↓
-Device
- ↓
-Server Selection
- ↓
-Peer Creation
- ↓
-WireGuard Configuration
- ↓
-VPN Tunnel
- ↓
-Internet
-```
-
-Verify:
-
-- Tunnel connectivity
-- Traffic routing
-- DNS
-- Routing
-- Disconnect
-- Peer removal
-
-## Phase 7 — Security Hardening
-
-Perform:
-
-- Threat modeling
-- Dependency auditing
-- Secret review
-- Authentication review
-- Authorization review
-- Network security review
-- Logging review
-- Firewall review
-
-## Phase 8 — Monitoring
-
-Add:
-
-- Prometheus
-- Grafana
-- Structured logs
-- Health checks
-- Alerts
-
-## Phase 9 — Infrastructure
-
-Add:
-
-- Terraform
-- Ansible
-- Server provisioning
-- Deployment scripts
-- Staging environment
-- Production environment
-
-## Phase 10 — Client
-
-Begin with one desktop client, then expand to:
-
-```text
-Windows
-macOS
-Linux
-Android
-iOS
-```
+- Server registration — `POST /admin/servers` to add a new VPN node
+- Server status management — set maintenance / offline
+- User management — suspend, restore, view audit history
+- Subscription overrides
+- Separate admin role authorization from user role
 
 ---
 
-# MVP Scope
+## Security Model
 
-The first functional MVP is intended to support the complete basic VPN lifecycle:
+- Passwords hashed with bcrypt (cost 10)
+- JWTs signed with HS256, 15-minute access token lifetime, 7-day rotating refresh tokens stored server-side
+- Go→Rust calls use a pre-shared bearer token validated with constant-time comparison
+- `/health` and `/metrics` on the engine are unauthenticated — bind engine control port to a private interface in production
+- All sensitive values in environment variables, never committed — `.env` is gitignored
+- `audit_logs` table is append-only — no delete or update permissions for the API database user in production
+- WireGuard handles all VPN cryptography (Noise Protocol Framework, ChaCha20-Poly1305, Curve25519)
+- No custom cryptographic primitives anywhere in the codebase
 
-1. Create a user
-2. Authenticate the user
-3. Register a device
-4. Register a VPN server
-5. Select a VPN server
-6. Generate a WireGuard identity/configuration
-7. Create a VPN peer
-8. Connect the client
-9. Establish a WireGuard tunnel
-10. Route traffic
-11. Track the VPN session
-12. Disconnect
-13. Remove or disable the peer
-14. Record audit events
-15. Report server health
-
-The MVP should prove the architecture before the platform expands into a larger multi-client, multi-region VPN service.
+See [docs/security.md](docs/security.md) and [docs/threat-model.md](docs/threat-model.md) for the full security analysis.
 
 ---
 
-# Engineering Rules
+## Documentation
 
-The project follows several non-negotiable engineering rules.
-
-## Do
-
-- Keep control-plane and data-plane responsibilities separate
-- Use established cryptographic technologies
-- Validate inputs
-- Enforce authorization server-side
-- Use database constraints
-- Use migrations
-- Test critical behavior
-- Use structured logging
-- Monitor service health
-- Keep infrastructure configuration separate from application logic
-- Make security assumptions explicit
-- Keep changes small and reviewable
-
-## Do Not
-
-Never:
-
-- Invent custom encryption
-- Invent a custom VPN protocol
-- Store private keys unnecessarily
-- Hardcode credentials
-- Commit secrets
-- Expose administrative engine endpoints publicly
-- Trust client-provided authorization
-- Put packet forwarding in the Go API
-- Put business logic in the Rust VPN engine
-- Log private keys or authentication tokens
-- Blindly execute shell commands
-- Accept arbitrary firewall commands from API requests
-- Skip input validation
-- Skip authorization
-- Claim security without testing
-- Introduce Kubernetes before it is needed
-- Over-engineer the MVP
+| Document                                                         | Contents                                                      |
+| ---------------------------------------------------------------- | ------------------------------------------------------------- |
+| [docs/architecture.md](docs/architecture.md)                     | Component design, data flow, technology decisions             |
+| [docs/api.md](docs/api.md)                                       | REST API reference with request/response examples             |
+| [docs/security.md](docs/security.md)                             | Security model, secret management, transport security         |
+| [docs/networking.md](docs/networking.md)                         | WireGuard setup, routing, NAT, DNS leak prevention            |
+| [docs/deployment.md](docs/deployment.md)                         | Docker, migrations, VPN node provisioning checklist           |
+| [docs/threat-model.md](docs/threat-model.md)                     | 14 threats with impact, likelihood, mitigation, residual risk |
+| [packages/protocol/openapi.yaml](packages/protocol/openapi.yaml) | Full OpenAPI 3.1 specification                                |
 
 ---
 
-# Code Quality Checklist
+## License
 
-Before a feature is considered complete:
+Copyright (c) 2026 Solid VPN. All rights reserved.
+All rights reserved.
 
-```text
-[ ] Code compiles
-[ ] Tests pass
-[ ] Error handling exists
-[ ] Input validation exists
-[ ] Authorization exists where required
-[ ] No secrets are committed
-[ ] Logs contain no sensitive credentials
-[ ] Database migrations exist
-[ ] API documentation is updated
-[ ] Relevant tests exist
-[ ] README/documentation is updated
-```
+PROPRIETARY SOFTWARE LICENSE
 
----
+This software and all associated source code, documentation, designs, interfaces, algorithms, and other materials are proprietary and confidential property of Willstone Strategic Industries Limited.
 
-# First Development Milestone
+Permission is not granted to copy, modify, distribute, publish, sublicense, sell, lease, reverse engineer, decompile, disassemble, or otherwise use, reproduce, or exploit this software or any portion of it without prior written authorization from Willstone Strategic Industries Limited.
 
-The foundation milestone is considered successful when the local development environment can start successfully with:
+Access to or possession of this source code does not grant any ownership, license, or other intellectual property rights.
 
-```bash
-docker compose up
-```
+Unauthorized use, reproduction, distribution, modification, or disclosure of this software is strictly prohibited.
 
-The environment should provide:
+For licensing, commercial use, partnership, or other authorized access, contact Willstone Strategic Industries Limited.
 
-- A running Go API
-- A running Rust VPN engine
-- A reachable PostgreSQL database
-- Successful project compilation
-- No hardcoded secrets
-
-The initial foundation should not present a fake VPN tunnel as functional.
-
-The first milestone should establish the infrastructure and service boundaries needed for the real VPN implementation.
-
----
-
-# Known Boundaries
-
-The master specification deliberately leaves some implementation decisions open.
-
-These include:
-
-- Specific payment provider
-- Specific cloud provider
-- Specific client framework
-- Exact authentication/token implementation
-- Exact WireGuard integration library
-- Exact secret-management platform
-- Exact infrastructure topology for production
-- Final deployment strategy
-- Detailed UI design
-
-Those decisions should be made based on the deployment environment, operational requirements, security review, and product needs rather than being invented prematurely.
-
----
-
-# Future Expansion
-
-Once the core architecture is proven, Solid VPN can expand toward:
-
-- Multiple VPN regions
-- More VPN server providers
-- Multiple desktop clients
-- Android client
-- iOS client
-- Automated server provisioning
-- Advanced server selection
-- More detailed analytics
-- Subscription tiers
-- Payment provider integrations
-- Advanced monitoring
-- Automated alerting
-- Production deployment automation
-- Additional client-side privacy controls
-- Kill switch support
-- Larger-scale VPN infrastructure
-
-The architecture is intentionally designed so these capabilities can be added without collapsing the control plane and data plane into a single service.
-
----
-
-# Project Philosophy
-
-Solid VPN is built around one central architectural principle:
-
-```text
-                 SOLID VPN
-
-              ┌──────────────┐
-              │   Clients    │
-              └──────┬───────┘
-                     │
-                     │ HTTPS
-                     ▼
-              ┌──────────────┐
-              │ Go Control   │
-              │    Plane     │
-              ├──────────────┤
-              │ Auth         │
-              │ Users        │
-              │ Devices      │
-              │ Billing      │
-              │ Server Mgmt  │
-              │ Sessions     │
-              └──────┬───────┘
-                     │
-              Secure Control
-                     │
-                     ▼
-              ┌──────────────┐
-              │ Rust Data    │
-              │    Plane     │
-              ├──────────────┤
-              │ WireGuard    │
-              │ Routing      │
-              │ NAT          │
-              │ Firewall     │
-              │ DNS          │
-              │ Networking   │
-              └──────┬───────┘
-                     │
-                     ▼
-                  Internet
-```
-
-**Go controls the VPN infrastructure.**
-
-**Rust moves and manages VPN traffic.**
-
-**WireGuard provides the VPN protocol and cryptographic tunnel.**
-
-Keeping these responsibilities separate provides a foundation for maintainability, security, scalability, and future product expansion.
-
----
-
-# Conclusion
-
-Solid VPN is designed as a complete VPN service platform rather than simply a WireGuard configuration tool.
-
-The project covers the major layers required to operate a managed VPN service:
-
-```text
-Users
-  ↓
-Authentication
-  ↓
-Devices
-  ↓
-Subscriptions / Access
-  ↓
-VPN Server Selection
-  ↓
-Peer Management
-  ↓
-Rust VPN Engine
-  ↓
-WireGuard
-  ↓
-Routing / NAT / Firewall / DNS
-  ↓
-Internet
-  ↓
-Session + Health + Metrics + Audit
-```
-
-The architecture intentionally separates business operations from network packet handling.
-
-That separation allows the Go control plane to evolve independently from the Rust networking engine, while WireGuard remains responsible for the underlying VPN protocol and cryptographic tunnel.
-
-The result is a foundation intended to support a secure, observable, maintainable, and scalable VPN platform as the project grows.
+Copyright © 2026 Willstone Strategic Industries Limited. All rights reserved
