@@ -24,13 +24,16 @@ pub struct AppState {
 pub async fn serve(state: AppState, port: u16) {
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
 
-    let app = Router::new()
-        .route("/health", get(health))
-        .route("/metrics", get(metrics_handler))
+    let protected = Router::new()
         .route("/peers", post(add_peer_handler))
         .route("/peers/{public_key}", delete(remove_peer_handler))
         .layer(middleware::from_fn_with_state(state.clone(), auth_middleware))
-        .with_state(state);
+        .with_state(state.clone());
+
+    let app = Router::new()
+        .route("/health", get(health))
+        .route("/metrics", get(metrics_handler))
+        .merge(protected);
 
     let listener = tokio::net::TcpListener::bind(addr)
         .await

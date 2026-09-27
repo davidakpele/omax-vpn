@@ -83,7 +83,7 @@ func main() {
 
 	handler := routes.New(routes.Options{
 		Logger:        log,
-		HealthHandler: health.NewHandler(pool),
+		HealthHandler: health.NewHandler(pool, engineClient),
 		AuthHandler:   authHandler,
 		AuthService:   authSvc,
 		UserHandler:   userHandler,
