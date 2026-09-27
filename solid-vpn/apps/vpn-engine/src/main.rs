@@ -1,4 +1,5 @@
 mod config;
+mod control;
 mod errors;
 mod network;
 mod security;
@@ -6,10 +7,16 @@ mod sessions;
 mod telemetry;
 mod tunnel;
 
+use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Instant;
+
+use tokio::sync::RwLock;
 use tokio::signal;
 use tracing::{error, info, warn};
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+
+use control::router::{serve, AppState};
 
 #[tokio::main]
 async fn main() {
@@ -28,11 +35,11 @@ async fn main() {
     };
 
     info!(
-        environment = %settings.environment,
-        server_id   = %settings.server_id,
-        interface   = %settings.wireguard_interface,
-        wg_port     = settings.wireguard_port,
-        control_api = settings.control_port,
+        environment  = %settings.environment,
+        server_id    = %settings.server_id,
+        interface    = %settings.wireguard_interface,
+        wg_port      = settings.wireguard_port,
+        control_port = settings.control_port,
         "configuration loaded"
     );
 
@@ -41,18 +48,24 @@ async fn main() {
 
     let start_time = Instant::now();
 
-    tunnel::wireguard::init_interface(
-        &settings.wireguard_interface,
-        settings.wireguard_port,
-    )
-    .await;
-
+    tunnel::wireguard::init_interface(&settings.wireguard_interface, settings.wireguard_port).await;
     network::dns::configure_peer_dns(&settings.dns_server).await;
     network::firewall::apply_base_rules(&settings.wireguard_interface).await;
 
     let outbound_iface = std::env::var("VPN_ENGINE_OUTBOUND_INTERFACE")
         .unwrap_or_else(|_| "eth0".to_string());
     network::nat::enable_masquerade(&settings.wireguard_interface, &outbound_iface).await;
+
+    let state = AppState {
+        wireguard_interface: settings.wireguard_interface.clone(),
+        token: settings.control_plane_token.clone(),
+        peer_ips: Arc::new(RwLock::new(HashMap::new())),
+    };
+
+    let control_port = settings.control_port;
+    tokio::spawn(async move {
+        serve(state, control_port).await;
+    });
 
     info!(
         service = "vpn-engine",

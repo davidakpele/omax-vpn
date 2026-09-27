@@ -28,6 +28,11 @@ dotenvy = "0.15"
 thiserror = "2"
 anyhow = "1"
 
+# HTTP server (control API)
+axum = { version = "0.7", features = ["json"] }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["trace"] }
+
 # HTTP client (control-plane communication)
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
