@@ -225,3 +225,27 @@ func (r *Repository) GetActiveSessionByDevice(ctx context.Context, deviceID uuid
 	}
 	return s, nil
 }
+
+func (r *Repository) GetPeerByID(ctx context.Context, id uuid.UUID) (*Peer, error) {
+	p := &Peer{}
+	var ipStr string
+	err := r.db.QueryRow(ctx, `
+		SELECT id, user_id, device_id, server_id, public_key, assigned_ip, status, created_at, updated_at
+		FROM vpn_peers WHERE id = $1
+	`, id).Scan(
+		&p.ID, &p.UserID, &p.DeviceID, &p.ServerID,
+		&p.PublicKey, &ipStr, &p.Status, &p.CreatedAt, &p.UpdatedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	parsed, err := netip.ParseAddr(ipStr)
+	if err != nil {
+		return nil, err
+	}
+	p.AssignedIP = parsed
+	return p, nil
+}

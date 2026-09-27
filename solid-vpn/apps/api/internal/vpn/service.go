@@ -7,22 +7,31 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/solid-vpn/api/internal/devices"
+	"github.com/solid-vpn/api/internal/engine"
 	"github.com/solid-vpn/api/internal/servers"
 )
 
 type Service struct {
-	repo       *Repository
-	serverSvc  *servers.Service
-	deviceRepo *devices.Repository
-	dns        string
+	repo         *Repository
+	serverSvc    *servers.Service
+	deviceRepo   *devices.Repository
+	engineClient *engine.Client
+	dns          string
 }
 
-func NewService(repo *Repository, serverSvc *servers.Service, deviceRepo *devices.Repository, dns string) *Service {
+func NewService(
+	repo *Repository,
+	serverSvc *servers.Service,
+	deviceRepo *devices.Repository,
+	engineClient *engine.Client,
+	dns string,
+) *Service {
 	return &Service{
-		repo:       repo,
-		serverSvc:  serverSvc,
-		deviceRepo: deviceRepo,
-		dns:        dns,
+		repo:         repo,
+		serverSvc:    serverSvc,
+		deviceRepo:   deviceRepo,
+		engineClient: engineClient,
+		dns:          dns,
 	}
 }
 
@@ -66,8 +75,19 @@ func (s *Service) Connect(ctx context.Context, userID uuid.UUID, req ConnectRequ
 		}
 	}
 
+	if _, err := s.engineClient.AddPeer(ctx, engine.AddPeerRequest{
+		PeerID:     peer.ID.String(),
+		PublicKey:  peer.PublicKey,
+		AssignedIP: peer.AssignedIP.String(),
+	}); err != nil {
+		_ = s.repo.ReleaseIP(ctx, server.ID, peer.AssignedIP)
+		_ = s.repo.DisablePeer(ctx, peer.ID)
+		return nil, fmt.Errorf("%w: %s", ErrEngineUnavailable, err)
+	}
+
 	session, err := s.repo.CreateSession(ctx, userID, req.DeviceID, server.ID, &peer.ID)
 	if err != nil {
+		_ = s.engineClient.RemovePeer(ctx, peer.PublicKey)
 		return nil, fmt.Errorf("create session: %w", err)
 	}
 
@@ -100,9 +120,11 @@ func (s *Service) Disconnect(ctx context.Context, userID uuid.UUID, req Disconne
 	}
 
 	if session.PeerID != nil {
-		if err := s.repo.DisablePeer(ctx, *session.PeerID); err != nil {
-			return fmt.Errorf("disable peer: %w", err)
+		peer, err := s.repo.GetPeerByID(ctx, *session.PeerID)
+		if err == nil && peer != nil {
+			_ = s.engineClient.RemovePeer(ctx, peer.PublicKey)
 		}
+		_ = s.repo.DisablePeer(ctx, *session.PeerID)
 	}
 
 	if err := s.serverSvc.DecrementConnections(ctx, session.ServerID); err != nil {
