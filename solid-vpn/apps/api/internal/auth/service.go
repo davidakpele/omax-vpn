@@ -13,6 +13,8 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"golang.org/x/crypto/bcrypt"
+
+	"github.com/solid-vpn/api/internal/audit"
 )
 
 var emailRegex = regexp.MustCompile(`^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$`)
@@ -24,12 +26,13 @@ type ServiceConfig struct {
 }
 
 type Service struct {
-	repo *Repository
-	cfg  ServiceConfig
+	repo  *Repository
+	cfg   ServiceConfig
+	audit *audit.Service
 }
 
-func NewService(repo *Repository, cfg ServiceConfig) *Service {
-	return &Service{repo: repo, cfg: cfg}
+func NewService(repo *Repository, cfg ServiceConfig, auditSvc *audit.Service) *Service {
+	return &Service{repo: repo, cfg: cfg, audit: auditSvc}
 }
 
 func (s *Service) Register(ctx context.Context, req RegisterRequest) (*User, error) {
@@ -59,6 +62,11 @@ func (s *Service) Register(ctx context.Context, req RegisterRequest) (*User, err
 	if err != nil {
 		return nil, fmt.Errorf("create user: %w", err)
 	}
+
+	s.audit.Log(ctx, audit.ActionUserCreated, &user.ID, "user", &user.ID, map[string]any{
+		"email": user.Email,
+	})
+
 	return user, nil
 }
 
@@ -77,10 +85,20 @@ func (s *Service) Login(ctx context.Context, req LoginRequest) (*TokenResponse, 
 	}
 
 	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(req.Password)); err != nil {
+		s.audit.Log(ctx, audit.ActionUserLoginFailed, nil, "user", &user.ID, map[string]any{
+			"email": req.Email,
+		})
 		return nil, ErrInvalidCreds
 	}
 
-	return s.issueTokenPair(ctx, user)
+	tokens, err := s.issueTokenPair(ctx, user)
+	if err != nil {
+		return nil, err
+	}
+
+	s.audit.Log(ctx, audit.ActionUserLogin, &user.ID, "user", &user.ID, nil)
+
+	return tokens, nil
 }
 
 func (s *Service) Refresh(ctx context.Context, req RefreshRequest) (*RefreshResponse, error) {

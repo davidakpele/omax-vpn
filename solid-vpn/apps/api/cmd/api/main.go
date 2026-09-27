@@ -16,6 +16,7 @@ import (
 	"go.uber.org/zap/zapcore"
 
 	"github.com/solid-vpn/api/config"
+	"github.com/solid-vpn/api/internal/audit"
 	"github.com/solid-vpn/api/internal/auth"
 	"github.com/solid-vpn/api/internal/devices"
 	"github.com/solid-vpn/api/internal/engine"
@@ -55,20 +56,23 @@ func main() {
 		defer pool.Close()
 	}
 
+	auditRepo := audit.NewRepository(pool)
+	auditSvc := audit.NewService(auditRepo, log)
+
 	authRepo := auth.NewRepository(pool)
 	authSvc := auth.NewService(authRepo, auth.ServiceConfig{
 		JWTSecret:          cfg.JWTSecret,
 		AccessExpiryMin:    cfg.JWTAccessExpiryMin,
 		RefreshExpiryHours: cfg.JWTRefreshExpiryH,
-	})
+	}, auditSvc)
 	authHandler := auth.NewHandler(authSvc)
 
 	userRepo := users.NewRepository(pool)
-	userSvc := users.NewService(userRepo)
+	userSvc := users.NewService(userRepo, auditSvc)
 	userHandler := users.NewHandler(userSvc)
 
 	deviceRepo := devices.NewRepository(pool)
-	deviceSvc := devices.NewService(deviceRepo)
+	deviceSvc := devices.NewService(deviceRepo, auditSvc)
 	deviceHandler := devices.NewHandler(deviceSvc)
 
 	serverRepo := servers.NewRepository(pool)
@@ -78,7 +82,7 @@ func main() {
 	engineClient := engine.NewClient(cfg.VPNEngineURL, cfg.VPNEngineToken)
 
 	vpnRepo := vpn.NewRepository(pool)
-	vpnSvc := vpn.NewService(vpnRepo, serverSvc, deviceRepo, engineClient, cfg.VPNDNS)
+	vpnSvc := vpn.NewService(vpnRepo, serverSvc, deviceRepo, engineClient, auditSvc, cfg.VPNDNS)
 	vpnHandler := vpn.NewHandler(vpnSvc)
 
 	handler := routes.New(routes.Options{

@@ -20,7 +20,7 @@ func NewRepository(db *pgxpool.Pool) *Repository {
 }
 
 func (r *Repository) AllocateIP(ctx context.Context, serverID uuid.UUID) (netip.Addr, error) {
-	var ipStr string
+	var ip netip.Addr
 	err := r.db.QueryRow(ctx, `
 		UPDATE ip_allocations
 		SET allocated = true
@@ -32,14 +32,11 @@ func (r *Repository) AllocateIP(ctx context.Context, serverID uuid.UUID) (netip.
 			FOR UPDATE SKIP LOCKED
 		)
 		RETURNING ip_address
-	`, serverID).Scan(&ipStr)
+	`, serverID).Scan(&ip)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return netip.Addr{}, ErrNoIPAvailable
 	}
-	if err != nil {
-		return netip.Addr{}, err
-	}
-	return netip.ParseAddr(ipStr)
+	return ip, err
 }
 
 func (r *Repository) ReleaseIP(ctx context.Context, serverID uuid.UUID, ip netip.Addr) error {
@@ -53,7 +50,6 @@ func (r *Repository) ReleaseIP(ctx context.Context, serverID uuid.UUID, ip netip
 
 func (r *Repository) UpsertPeer(ctx context.Context, userID, deviceID, serverID uuid.UUID, publicKey string, assignedIP netip.Addr) (*Peer, error) {
 	p := &Peer{}
-	var ipStr string
 	err := r.db.QueryRow(ctx, `
 		INSERT INTO vpn_peers (user_id, device_id, server_id, public_key, assigned_ip)
 		VALUES ($1, $2, $3, $4, $5)
@@ -62,41 +58,24 @@ func (r *Repository) UpsertPeer(ctx context.Context, userID, deviceID, serverID 
 		RETURNING id, user_id, device_id, server_id, public_key, assigned_ip, status, created_at, updated_at
 	`, userID, deviceID, serverID, publicKey, assignedIP.String()).Scan(
 		&p.ID, &p.UserID, &p.DeviceID, &p.ServerID,
-		&p.PublicKey, &ipStr, &p.Status, &p.CreatedAt, &p.UpdatedAt,
+		&p.PublicKey, &p.AssignedIP, &p.Status, &p.CreatedAt, &p.UpdatedAt,
 	)
-	if err != nil {
-		return nil, err
-	}
-	parsed, err := netip.ParseAddr(ipStr)
-	if err != nil {
-		return nil, err
-	}
-	p.AssignedIP = parsed
-	return p, nil
+	return p, err
 }
 
 func (r *Repository) GetPeerByDeviceAndServer(ctx context.Context, deviceID, serverID uuid.UUID) (*Peer, error) {
 	p := &Peer{}
-	var ipStr string
 	err := r.db.QueryRow(ctx, `
 		SELECT id, user_id, device_id, server_id, public_key, assigned_ip, status, created_at, updated_at
 		FROM vpn_peers WHERE device_id = $1 AND server_id = $2 AND status = 'ACTIVE'
 	`, deviceID, serverID).Scan(
 		&p.ID, &p.UserID, &p.DeviceID, &p.ServerID,
-		&p.PublicKey, &ipStr, &p.Status, &p.CreatedAt, &p.UpdatedAt,
+		&p.PublicKey, &p.AssignedIP, &p.Status, &p.CreatedAt, &p.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
-	if err != nil {
-		return nil, err
-	}
-	parsed, err := netip.ParseAddr(ipStr)
-	if err != nil {
-		return nil, err
-	}
-	p.AssignedIP = parsed
-	return p, nil
+	return p, err
 }
 
 func (r *Repository) DisablePeer(ctx context.Context, peerID uuid.UUID) error {
@@ -119,10 +98,7 @@ func (r *Repository) CreateSession(ctx context.Context, userID, deviceID, server
 		&s.BytesSent, &s.BytesReceived, &s.ClientIP, &s.StartedAt, &s.EndedAt,
 		&s.CreatedAt, &s.UpdatedAt,
 	)
-	if err != nil {
-		return nil, err
-	}
-	return s, nil
+	return s, err
 }
 
 func (r *Repository) GetSession(ctx context.Context, sessionID, userID uuid.UUID) (*Session, error) {
@@ -140,10 +116,7 @@ func (r *Repository) GetSession(ctx context.Context, sessionID, userID uuid.UUID
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
-	if err != nil {
-		return nil, err
-	}
-	return s, nil
+	return s, err
 }
 
 func (r *Repository) ListSessions(ctx context.Context, userID uuid.UUID, status string, limit, offset int) ([]*Session, int, error) {
@@ -220,32 +193,20 @@ func (r *Repository) GetActiveSessionByDevice(ctx context.Context, deviceID uuid
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
-	if err != nil {
-		return nil, err
-	}
-	return s, nil
+	return s, err
 }
 
 func (r *Repository) GetPeerByID(ctx context.Context, id uuid.UUID) (*Peer, error) {
 	p := &Peer{}
-	var ipStr string
 	err := r.db.QueryRow(ctx, `
 		SELECT id, user_id, device_id, server_id, public_key, assigned_ip, status, created_at, updated_at
 		FROM vpn_peers WHERE id = $1
 	`, id).Scan(
 		&p.ID, &p.UserID, &p.DeviceID, &p.ServerID,
-		&p.PublicKey, &ipStr, &p.Status, &p.CreatedAt, &p.UpdatedAt,
+		&p.PublicKey, &p.AssignedIP, &p.Status, &p.CreatedAt, &p.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
-	if err != nil {
-		return nil, err
-	}
-	parsed, err := netip.ParseAddr(ipStr)
-	if err != nil {
-		return nil, err
-	}
-	p.AssignedIP = parsed
-	return p, nil
+	return p, err
 }

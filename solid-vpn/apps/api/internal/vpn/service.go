@@ -6,6 +6,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/solid-vpn/api/internal/audit"
 	"github.com/solid-vpn/api/internal/devices"
 	"github.com/solid-vpn/api/internal/engine"
 	"github.com/solid-vpn/api/internal/servers"
@@ -16,6 +17,7 @@ type Service struct {
 	serverSvc    *servers.Service
 	deviceRepo   *devices.Repository
 	engineClient *engine.Client
+	audit        *audit.Service
 	dns          string
 }
 
@@ -24,6 +26,7 @@ func NewService(
 	serverSvc *servers.Service,
 	deviceRepo *devices.Repository,
 	engineClient *engine.Client,
+	auditSvc *audit.Service,
 	dns string,
 ) *Service {
 	return &Service{
@@ -31,6 +34,7 @@ func NewService(
 		serverSvc:    serverSvc,
 		deviceRepo:   deviceRepo,
 		engineClient: engineClient,
+		audit:        auditSvc,
 		dns:          dns,
 	}
 }
@@ -95,6 +99,11 @@ func (s *Service) Connect(ctx context.Context, userID uuid.UUID, req ConnectRequ
 		return nil, fmt.Errorf("increment connections: %w", err)
 	}
 
+	s.audit.Log(ctx, audit.ActionVPNSessionStarted, &userID, "vpn_session", &session.ID, map[string]any{
+		"device_id": req.DeviceID.String(),
+		"server_id": server.ID.String(),
+	})
+
 	cfg := buildWireguardConfig(device.PublicKey, peer.AssignedIP.String(), server, s.dns)
 
 	return &ConnectResponse{
@@ -130,6 +139,10 @@ func (s *Service) Disconnect(ctx context.Context, userID uuid.UUID, req Disconne
 	if err := s.serverSvc.DecrementConnections(ctx, session.ServerID); err != nil {
 		return fmt.Errorf("decrement connections: %w", err)
 	}
+
+	s.audit.Log(ctx, audit.ActionVPNSessionEnded, &userID, "vpn_session", &session.ID, map[string]any{
+		"server_id": session.ServerID.String(),
+	})
 
 	return nil
 }
