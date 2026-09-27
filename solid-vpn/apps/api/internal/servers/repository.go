@@ -71,29 +71,20 @@ func (r *Repository) List(ctx context.Context, country string, regionID *uuid.UU
 
 func (r *Repository) GetByID(ctx context.Context, id uuid.UUID) (*Server, error) {
 	s := &Server{}
-	var ip string
 	err := r.db.QueryRow(ctx, `
 		SELECT id, region_id, name, hostname, public_ip, country, city, provider,
 		       status, capacity, active_connections, wireguard_port, public_key,
 		       created_at, updated_at
 		FROM vpn_servers WHERE id = $1
 	`, id).Scan(
-		&s.ID, &s.RegionID, &s.Name, &s.Hostname, &ip, &s.Country, &s.City,
+		&s.ID, &s.RegionID, &s.Name, &s.Hostname, &s.PublicIP, &s.Country, &s.City,
 		&s.Provider, &s.Status, &s.Capacity, &s.ActiveConnections,
 		&s.WireguardPort, &s.PublicKey, &s.CreatedAt, &s.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
-	if err != nil {
-		return nil, err
-	}
-	parsed, err := netip.ParseAddr(ip)
-	if err != nil {
-		return nil, err
-	}
-	s.PublicIP = parsed
-	return s, nil
+	return s, err
 }
 
 func (r *Repository) ListSelectable(ctx context.Context) ([]*Server, error) {
@@ -136,19 +127,13 @@ func scanServers(rows pgx.Rows) ([]*Server, error) {
 	var servers []*Server
 	for rows.Next() {
 		s := &Server{}
-		var ip string
 		if err := rows.Scan(
-			&s.ID, &s.RegionID, &s.Name, &s.Hostname, &ip, &s.Country, &s.City,
+			&s.ID, &s.RegionID, &s.Name, &s.Hostname, &s.PublicIP, &s.Country, &s.City,
 			&s.Provider, &s.Status, &s.Capacity, &s.ActiveConnections,
 			&s.WireguardPort, &s.PublicKey, &s.CreatedAt, &s.UpdatedAt,
 		); err != nil {
 			return nil, err
 		}
-		parsed, err := netip.ParseAddr(ip)
-		if err != nil {
-			return nil, err
-		}
-		s.PublicIP = parsed
 		servers = append(servers, s)
 	}
 	return servers, rows.Err()
@@ -157,3 +142,5 @@ func scanServers(rows pgx.Rows) ([]*Server, error) {
 func itoa(n int) string {
 	return fmt.Sprintf("%d", n)
 }
+
+var _ = netip.Addr{}

@@ -11,12 +11,17 @@ type DB interface {
 	Ping(ctx context.Context) error
 }
 
-type Handler struct {
-	db DB
+type Engine interface {
+	Health(ctx context.Context) error
 }
 
-func NewHandler(db DB) *Handler {
-	return &Handler{db: db}
+type Handler struct {
+	db     DB
+	engine Engine
+}
+
+func NewHandler(db DB, eng Engine) *Handler {
+	return &Handler{db: db, engine: eng}
 }
 
 type healthResponse struct {
@@ -55,6 +60,19 @@ func (h *Handler) Ready(w http.ResponseWriter, r *http.Request) {
 	} else {
 		checks["database"] = "not configured"
 		allOK = false
+	}
+
+	if h.engine != nil {
+		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+		defer cancel()
+		if err := h.engine.Health(ctx); err != nil {
+			checks["vpn_engine"] = "unhealthy: " + err.Error()
+			allOK = false
+		} else {
+			checks["vpn_engine"] = "healthy"
+		}
+	} else {
+		checks["vpn_engine"] = "not configured"
 	}
 
 	status := http.StatusOK
